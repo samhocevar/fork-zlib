@@ -119,11 +119,23 @@ local gzFile gz_open(path, fd, mode)
     state->mode = GZ_NONE;
     state->level = Z_DEFAULT_COMPRESSION;
     state->strategy = Z_DEFAULT_STRATEGY;
+    state->threshold = 0;
     state->direct = 0;
     while (*mode) {
         if (*mode >= '0' && *mode <= '9')
             state->level = *mode - '0';
-        else
+        else if (mode[0] == 'l' && mode[1] >= '0' && mode[1] <= '9') {
+            /* Lossy compression, lnnn where nnn is the threshold. */
+            state->level = 10;
+            char *end;
+            long got = strtol(mode + 1, &end, 10);
+            if (got > UINT_MAX) {
+                fprintf(stderr, "threshold too large, shrinking");
+                got = UINT_MAX;
+            }
+            state->threshold = got;
+            mode = end - 1; /* skip past number, with ++ at end of loop */
+        } else
             switch (*mode) {
             case 'r':
                 state->mode = GZ_READ;

@@ -83,6 +83,9 @@ local block_state deflate_slow   OF((deflate_state *s, int flush));
 #endif
 local block_state deflate_rle    OF((deflate_state *s, int flush));
 local block_state deflate_huff   OF((deflate_state *s, int flush));
+local block_state deflate_lossy  OF((deflate_state *s, int flush));
+local void memrpt                OF((Bytef *dest, size_t destlen,
+                                    const Bytef *src, size_t srclen));
 local void lm_init        OF((deflate_state *s));
 local void putShortMSB    OF((deflate_state *s, uInt b));
 local void flush_pending  OF((z_streamp strm));
@@ -93,12 +96,21 @@ local unsigned read_buf   OF((z_streamp strm, Bytef *buf, unsigned size));
       uInt longest_match  OF((deflate_state *s, IPos cur_match));
 #else
 local uInt longest_match  OF((deflate_state *s, IPos cur_match));
+local uInt longest_match_lossy OF((deflate_state *s, IPos cur_match));
 #endif
 
 #ifdef ZLIB_DEBUG
 local  void check_match OF((deflate_state *s, IPos start, IPos match,
                             int length));
 #endif
+local void find_lossy_match OF((const Bytef *a, const Bytef *b,
+                               uInt max, uInt threshold,
+                               uInt *len, float *score));
+
+/* Whether to have 'dithering' of pixel mismatch in lossy compression.
+   Best set to true for greyscale images and false for 24-bit (at
+   present). */
+#define DITHER_LOSS 0
 
 /* ===========================================================================
  * Local data
@@ -131,7 +143,7 @@ local const config configuration_table[2] = {
 /* 0 */ {0,    0,  0,    0, deflate_stored},  /* store only */
 /* 1 */ {4,    4,  8,    4, deflate_fast}}; /* max speed, no lazy matches */
 #else
-local const config configuration_table[10] = {
+local const config configuration_table[11] = {
 /*      good lazy nice chain */
 /* 0 */ {0,    0,  0,    0, deflate_stored},  /* store only */
 /* 1 */ {4,    4,  8,    4, deflate_fast}, /* max speed, no lazy matches */
@@ -143,7 +155,9 @@ local const config configuration_table[10] = {
 /* 6 */ {8,   16, 128, 128, deflate_slow},
 /* 7 */ {8,   32, 128, 256, deflate_slow},
 /* 8 */ {32, 128, 258, 1024, deflate_slow},
-/* 9 */ {32, 258, 258, 4096, deflate_slow}}; /* max compression */
+/* 9 */ {32, 258, 258, 4096, deflate_slow}, /* max compression */
+
+/* 10 */ {32, 258, 258, 4096, deflate_lossy}}; /* non-exact matches allowed */
 #endif
 
 /* Note: the deflate() code requires max_lazy >= MIN_MATCH and max_chain >= 4
@@ -296,7 +310,7 @@ int ZEXPORT deflateInit2_(strm, level, method, windowBits, memLevel, strategy,
     }
 #endif
     if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || method != Z_DEFLATED ||
-        windowBits < 8 || windowBits > 15 || level < 0 || level > 9 ||
+        windowBits < 8 || windowBits > 15 || level < 0 || level > 10 ||
         strategy < 0 || strategy > Z_FIXED || (windowBits == 8 && wrap != 1)) {
         return Z_STREAM_ERROR;
     }
@@ -581,7 +595,7 @@ int ZEXPORT deflateParams(strm, level, strategy)
 #else
     if (level == Z_DEFAULT_COMPRESSION) level = 6;
 #endif
-    if (level < 0 || level > 9 || strategy < 0 || strategy > Z_FIXED) {
+    if (level < 0 || level > 10 || strategy < 0 || strategy > Z_FIXED) {
         return Z_STREAM_ERROR;
     }
     func = configuration_table[s->level].func;
@@ -706,6 +720,16 @@ uLong ZEXPORT deflateBound(strm, sourceLen)
     /* default settings: return tight bound for that case */
     return sourceLen + (sourceLen >> 12) + (sourceLen >> 14) +
            (sourceLen >> 25) + 13 - 6 + wraplen;
+}
+
+/* =========================================================================
+ * Set the threshold for lossy compression.  Useful only at level 10.
+ */
+void ZEXPORT setLossyThreshold(strm, threshold)
+    z_streamp strm;
+    uInt threshold;
+{
+    strm->state->lossy_threshold = threshold;
 }
 
 /* =========================================================================
@@ -1204,6 +1228,7 @@ local void lm_init (s)
     s->good_match       = configuration_table[s->level].good_length;
     s->nice_match       = configuration_table[s->level].nice_length;
     s->max_chain_length = configuration_table[s->level].max_chain;
+    s->lossy_threshold  = 0; // FIXME
 
     s->strstart = 0;
     s->block_start = 0L;
@@ -1334,22 +1359,24 @@ local uInt longest_match(s, cur_match)
 
         /* The check at best_len-1 can be removed because it will be made
          * again later. (This heuristic is not always a win.)
-         * It is not necessary to compare scan[2] and match[2] since they
-         * are always equal when the other bytes match, given that
-         * the hash keys are equal and that HASH_BITS >= 8.
+         * It _is_ necessary to compare scan[2] and match[2] because of the
+         * deliberately broken hash function 8-).
          */
-        scan += 2, match++;
-        Assert(*scan == *match, "match[2]?");
+        scan++;
 
-        /* We check for insufficient lookahead only every 8th comparison;
-         * the 256th check will be made at strstart+258.
-         */
-        do {
-        } while (*++scan == *++match && *++scan == *++match &&
-                 *++scan == *++match && *++scan == *++match &&
-                 *++scan == *++match && *++scan == *++match &&
-                 *++scan == *++match && *++scan == *++match &&
-                 scan < strend);
+        if (*++scan == *++match) {
+            /* We check for insufficient lookahead only every 8th comparison;
+             * the 256th check will be made at strstart+258.
+             */
+            do {
+            } while (*++scan == *++match && *++scan == *++match &&
+                     *++scan == *++match && *++scan == *++match &&
+                     *++scan == *++match && *++scan == *++match &&
+                     *++scan == *++match && *++scan == *++match &&
+                     scan < strend);
+        } else {
+            /* The [2] aren't equal. */
+        }
 
         Assert(scan <= s->window+(unsigned)(s->window_size-1), "wild scan");
 
@@ -1376,6 +1403,130 @@ local uInt longest_match(s, cur_match)
     return s->lookahead;
 }
 #endif /* ASMV */
+
+/* As longest_match() but tolerates some mismatches.
+ *
+ * IN assertions: prev_length >= 1
+ * OUT assertion: the match length is not greater than s->lookahead.
+ *
+ * Sets s->match_start, s->match_length and s->match_score.
+ */
+local uInt longest_match_lossy(s, cur_match)
+    deflate_state *s;
+    IPos cur_match;                             /* current match */
+{
+    int best_score = s->prev_score;             /* best match score so far */
+    const IPos limit = s->strstart > (IPos)MAX_DIST(s) ?
+        s->strstart - (IPos)MAX_DIST(s) : 0;
+    Assert(limit >= 0, "limit negative");
+    Assert(cur_match < s->strstart, "longest_match_lossy(): no future A");
+
+    Assert((ulg)s->strstart <= s->window_size-MIN_LOOKAHEAD, "need lookahead B");
+
+    while (cur_match > limit) {
+        Assert(cur_match < s->strstart, "longest_match_lossy(): no future B");
+        uInt max = MAX_MATCH; if (max > s->lookahead) max = s->lookahead;
+        uInt len;
+        float score;
+        Assert(max > 0, "max == 0");
+
+        find_lossy_match(s->window + s->strstart, s->window + cur_match,
+                         max, s->lossy_threshold,
+                         &len, &score);
+
+        Assert(len <= max, "match length too long");
+        Assert(len <= s->lookahead, "match longer than lookahead");
+
+        if (len < 2) {
+            // Too short to use.
+        } else if (score <= best_score) {
+            // Doesn't beat the current best.
+        } else {
+            // Best so far.
+            s->match_start = cur_match;
+            s->match_length = len;
+            s->match_score = best_score = score;
+        }
+
+        Assert(cur_match < s->strstart, "longest_match_lossy(): no future C");
+        Assert(cur_match > 0, "cur_match zero");
+
+        // Heuristic - find a matching character.
+        const Bytef c = s->window[s->strstart];
+        do
+            --cur_match;
+        while (cur_match > limit && s->window[cur_match] != c);
+
+        Assert(cur_match < s->strstart, "longest_match_lossy(): no future D");
+    }
+    return s->lookahead;
+}
+
+static int const pico8_dist[256] = {
+    0, 97, 155, 157, 197, 151, 339, 420, 266, 302, 349, 234, 310, 235, 327, 368,
+    97, 0, 97, 96, 150, 79, 252, 335, 230, 269, 300, 189, 215, 146, 253, 290,
+    155, 97, 0, 159, 69, 58, 207, 283, 134, 198, 241, 230, 235, 109, 174, 228,
+    157, 96, 159, 0, 181, 106, 234, 314, 288, 269, 277, 96, 182, 151, 269, 278,
+    197, 150, 69, 181, 0, 80, 185, 253, 119, 128, 176, 224, 256, 115, 146, 188,
+    151, 79, 58, 106, 80, 0, 189, 269, 182, 193, 222, 171, 203, 90, 185, 218,
+    339, 252, 207, 234, 185, 189, 0, 83, 237, 210, 176, 244, 164, 108, 102, 68,
+    420, 335, 283, 314, 253, 269, 83, 0, 286, 244, 193, 311, 225, 190, 137, 72,
+    266, 230, 134, 288, 119, 182, 237, 286, 0, 180, 239, 342, 327, 188, 149, 224,
+    302, 269, 198, 269, 128, 193, 210, 244, 180, 0, 82, 268, 333, 204, 173, 174,
+    349, 300, 241, 277, 176, 222, 176, 193, 239, 82, 0, 255, 310, 207, 174, 134,
+    234, 189, 230, 96, 224, 171, 244, 311, 342, 268, 255, 0, 212, 199, 299, 281,
+    310, 215, 235, 182, 256, 203, 164, 225, 327, 333, 310, 212, 0, 144, 237, 232,
+    235, 146, 109, 151, 115, 90, 108, 190, 188, 204, 207, 199, 144, 0, 124, 151,
+    327, 253, 174, 269, 146, 185, 102, 137, 149, 173, 174, 299, 237, 124, 0, 85,
+    368, 290, 228, 278, 188, 218, 68, 72, 224, 174, 134, 281, 232, 151, 85, 0,
+};
+
+// Finds the best lossy match of a at b, and sets len and score.
+local void find_lossy_match(a, b, max, threshold, len, score)
+     const Bytef *a, *b;
+     uInt max;
+     uInt threshold;
+     uInt *len;
+     float *score;
+{
+    Bytef const *old_a = a;
+    const int distance = a - b;
+    Assert(distance > 0, "bad a and b");
+    Assert(b < old_a, "bad b");
+
+    int badness = 0;
+
+    uInt l = 0;
+#if DITHER_LOSS
+    int old_diff = 0;
+#else
+    const int old_diff = 0;
+#endif
+    while (l < max) {
+        //const int diff = abs(*a + old_diff - *b);
+        const int d1 = pico8_dist[(*a & 0x0f) * 16 + (*b & 0x0f)];
+        const int d2 = pico8_dist[(*a & 0xf0) + (*b & 0xf0) / 16];
+        const int diff = d1 * d1 + d2 * d2;
+        if (diff) {
+            // Give up if takes badness over threshold.
+            //const int newb = badness + diff * diff;
+            const int newb = badness + diff;
+            if (newb >= threshold) break;
+            badness = newb;
+        }
+
+        ++l;
+#if DITHER_LOSS
+        old_diff = diff;
+#endif
+
+        ++a; ++b;
+        if (b == old_a) b -= distance;
+    }
+
+    *len = l;
+    *score = l - (badness / (threshold + 1));
+}
 
 #else /* FASTEST */
 
@@ -2161,3 +2312,135 @@ local block_state deflate_huff(s, flush)
         FLUSH_BLOCK(s, 0);
     return block_done;
 }
+
+/* ===========================================================================
+ * As deflate_slow() but does lossy compression, using inexact matches if
+ * necessary.  Modifies the input data!
+ */
+local block_state deflate_lossy(s, flush)
+    deflate_state *s;
+    int flush;
+{
+    int bflush;              /* set if current block must be flushed */
+
+    /* Process the input block. */
+    for (;;) {
+        /* Make sure that we always have enough lookahead, except
+         * at the end of the input file. We need MAX_MATCH bytes
+         * for the next match, plus MIN_MATCH bytes to insert the
+         * string following the next match.
+         */
+        if (s->lookahead < MIN_LOOKAHEAD) {
+            fill_window(s);
+            if (s->lookahead < MIN_LOOKAHEAD && flush == Z_NO_FLUSH) {
+                return need_more;
+            }
+            if (s->lookahead == 0) break; /* flush the current block */
+        }
+
+        /* Find the best match, discarding those <= prev_score.
+         */
+        s->prev_match = s->match_start;
+        s->prev_length = s->match_length;
+        s->prev_score = s->match_score;
+        s->match_length = MIN_MATCH-1;
+        s->match_score = -1;
+
+        if (s->lookahead >= MIN_MATCH) {
+            /* To simplify the code, we prevent matches with the string
+             * of window index 0 (in particular we have to avoid a match
+             * of the string with itself at the start of the input file).
+             */
+            if (s->strategy != Z_HUFFMAN_ONLY) {
+                if (s->strstart == 0) {
+                    // Can't look back.
+                    s->match_length = s->match_score = 0;
+                }
+                else {
+                    /* longest_match_lossy() sets match_start, match_length and match_score */
+                    longest_match_lossy(s, s->strstart - 1);
+                }
+            }
+
+            if (s->match_length <= 5 && (s->strategy == Z_FILTERED ||
+                 (s->match_length == MIN_MATCH &&
+                  s->strstart - s->match_start > TOO_FAR))) {
+
+                /* If prev_match is also MIN_MATCH, match_start is garbage
+                 * but we will ignore the current match anyway.
+                 */
+                s->match_length = MIN_MATCH-1;
+                s->match_score = -1;
+            }
+        }
+
+        /* If there was a match at the previous step and the current
+         * match is not better, output the previous match:
+         */
+        if (s->prev_length >= MIN_MATCH && s->match_score <= s->prev_score) {
+            // Could come before or after the memrpt().
+            _tr_tally_dist(s, s->strstart - 1 - s->prev_match,
+                           s->prev_length - MIN_MATCH, bflush);
+
+            memrpt(s->window + s->strstart - 1, s->prev_length,
+                   s->window + s->prev_match, (s->strstart - 1 - s->prev_match));
+
+            s->lookahead -= s->prev_length - 1;
+            s->strstart += s->prev_length - 1;
+            s->prev_length = 0;
+            s->prev_score = -1;
+            s->match_available = 0;
+            s->match_length = MIN_MATCH-1;
+            s->match_score = -1;
+
+            if (bflush) FLUSH_BLOCK(s, 0);
+        } else if (s->match_available) {
+            /* If there was no match at the previous position, output a
+             * single literal. If there was a match but the current match
+             * is longer, truncate the previous match to a single literal.
+             */
+            Tracevv((stderr,"%c", s->window[s->strstart-1]));
+            _tr_tally_lit(s, s->window[s->strstart-1], bflush);
+            if (bflush) {
+                FLUSH_BLOCK_ONLY(s, 0);
+            }
+            s->strstart++;
+            s->lookahead--;
+            if (s->strm->avail_out == 0) return need_more;
+        } else {
+            /* There is no previous match to compare with, wait for
+             * the next step to decide.
+             */
+            s->match_available = 1;
+            s->strstart++;
+            s->lookahead--;
+        }
+    }
+    Assert (flush != Z_NO_FLUSH, "no flush?");
+    if (s->match_available) {
+        Tracevv((stderr,"%c", s->window[s->strstart-1]));
+        _tr_tally_lit(s, s->window[s->strstart-1], bflush);
+        s->match_available = 0;
+    }
+    FLUSH_BLOCK(s, flush == Z_FINISH);
+    return flush == Z_FINISH ? finish_done : block_done;
+}
+
+
+/* memrpt(dest, destlen, src, srclen) sets destlen bytes at dest to
+ * repeating copies of the string (of length srclen) at src, plus a
+ * final part-copy if needed.  Dest and src must not overlap.
+ */
+local void memrpt(dest, destlen, src, srclen)
+     Bytef *dest;
+     const Bytef *src;
+     size_t destlen, srclen;
+{
+    while (destlen) {
+        if (srclen > destlen) srclen = destlen;
+        memcpy(dest, src, srclen);
+        dest += srclen;
+        destlen -= srclen;
+    }
+}
+

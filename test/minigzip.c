@@ -550,7 +550,8 @@ void file_uncompress(file)
  *   -f : compress with Z_FILTERED
  *   -h : compress with Z_HUFFMAN_ONLY
  *   -r : compress with Z_RLE
- *   -1 to -9 : compression level
+ *   -1 to -9 : compression level, or
+ *      -lnnn : lossy compression, nnn is the threshold (eg 10000)
  */
 
 int main(argc, argv)
@@ -559,6 +560,7 @@ int main(argc, argv)
 {
     int copyout = 0;
     int uncompr = 0;
+    unsigned int threshold = 0;
     gzFile file;
     char *bname, outmode[20];
 
@@ -595,12 +597,26 @@ int main(argc, argv)
       else if ((*argv)[0] == '-' && (*argv)[1] >= '1' && (*argv)[1] <= '9' &&
                (*argv)[2] == 0)
         outmode[2] = (*argv)[1];
+      else if ((*argv)[0] == '-' && (*argv)[1] == 'l'
+              && (*argv)[2] >= '0' && (*argv)[2] <= '9') {
+        char *end;
+        long int got = strtol(*argv + 2, &end, 10);
+        if (*end != 0)
+          error("bad threshold");
+        if (got > UINT_MAX)
+          error("threshold too large");
+        threshold = got;
+      }
       else
         break;
       argc--, argv++;
     }
     if (outmode[3] == ' ')
         outmode[3] = 0;
+    if (threshold > 0) {
+        int pos = strlen(outmode);
+        pos += sprintf(outmode + pos, "l%u", threshold);
+    }
     if (argc == 0) {
         SET_BINARY_MODE(stdin);
         SET_BINARY_MODE(stdout);

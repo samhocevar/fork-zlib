@@ -156,17 +156,26 @@ typedef struct internal_state {
      * negative when the window is moved backwards.
      */
 
-    uInt match_length;           /* length of best match */
-    IPos prev_match;             /* previous match */
-    int match_available;         /* set if previous match exists */
     uInt strstart;               /* start of string to insert */
-    uInt match_start;            /* start of matching string */
     uInt lookahead;              /* number of valid bytes ahead in window */
 
+    /* Current match: */
+    uInt match_start;            /* start of matching string */
+    uInt match_length;           /* length of best match */
+    float match_score;           /* score of best match (for lossy matching) */
+
+    /* Previous match, if any: */
+    int match_available;         /* set if previous match exists */
+    IPos prev_match;             /* previous match */
     uInt prev_length;
-    /* Length of the best match at previous step. Matches not greater than this
-     * are discarded. This is used in the lazy match evaluation.
+    float prev_score;
+    /* Length and score of the best match at previous step. Matches
+     * not greater than this are discarded. This is used in the lazy
+     * match evaluation - using length for lossless compression, score
+     * for lossy.
      */
+
+    uInt lossy_threshold; /* used by lossy matching, higher means more lossy */
 
     uInt max_chain_length;
     /* To speed up deflation, hash chains are never searched beyond this

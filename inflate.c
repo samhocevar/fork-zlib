@@ -80,6 +80,7 @@
  * The history for versions after 1.2.0 are in ChangeLog in zlib distribution.
  */
 
+#include <stdio.h>
 #include "zutil.h"
 #include "inftrees.h"
 #include "inflate.h"
@@ -1209,9 +1210,10 @@ int flush;
                      state->flags ? hold :
 #endif
                      ZSWAP32(hold)) != state->check) {
-                    strm->msg = (char *)"incorrect data check";
-                    state->mode = BAD;
-                    break;
+                    //strm->msg = (char *)"incorrect data check";
+                    //state->mode = BAD;
+                    //break;
+                    fprintf(stderr, "incorrect data check - ignoring\n");
                 }
                 INITBITS();
                 Tracev((stderr, "inflate:   check matches trailer\n"));

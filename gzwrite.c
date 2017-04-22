@@ -49,6 +49,8 @@ local int gz_init(state)
             gz_error(state, Z_MEM_ERROR, "out of memory");
             return -1;
         }
+        if (state->threshold > 0)
+            setLossyThreshold(strm, state->threshold);
         strm->next_in = NULL;
     }
 

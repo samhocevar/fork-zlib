@@ -190,6 +190,7 @@ typedef struct {
         /* just for writing */
     int level;              /* compression level */
     int strategy;           /* compression strategy */
+    int threshold;          /* for lossy compression */
         /* seek request */
     z_off64_t skip;         /* amount to skip (already rewound if backwards) */
     int seek;               /* true if seek request pending */

@@ -828,6 +828,12 @@ ZEXTERN int ZEXPORT deflateSetHeader OF((z_streamp strm,
    stream state was inconsistent.
 */
 
+ZEXTERN void ZEXPORT setLossyThreshold OF((z_streamp strm, uInt threshold));
+/*
+     Dynamically update the threshold for lossy compression
+   (compression level 10).
+*/
+
 /*
 ZEXTERN int ZEXPORT inflateInit2 OF((z_streamp strm,
                                      int  windowBits));
